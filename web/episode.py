@@ -10,7 +10,7 @@ from web import moviedb
 from flasktools.db import fetch_query, mutate_query
 from flasktools.auth.oauth import auth_token_required
 
-bp = Blueprint('episodes', __name__)
+bp = Blueprint('episode', __name__)
 
 
 @bp.route('/list', methods=['GET'])
@@ -67,7 +67,6 @@ def getlist(userid: int) -> Response:
 			e['seasonnumber'],
 			e['episodenumber']
 		)
-		print(e['image'])
 		del e['show_moviedb_id']
 
 	return jsonify(episodes)

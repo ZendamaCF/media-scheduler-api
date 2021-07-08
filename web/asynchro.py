@@ -29,6 +29,11 @@ def fetch_episode_image(moviedb_id: int, season: int, episode: int):
 	moviedb.get_episode_image(moviedb_id, season, episode)
 
 
+@celery.task(queue='scheduler')
+def fetch_show_poster(moviedb_id: int):
+	moviedb.get_tvshow_poster(moviedb_id)
+
+
 def lpad(n, length=2):
 	return str(n).zfill(length)
 

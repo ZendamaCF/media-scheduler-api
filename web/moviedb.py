@@ -124,15 +124,21 @@ def get_movie_poster(moviedb_id: int) -> Response:
 	)
 
 
-def get_tvshow_poster(moviedb_id: int) -> Response:
-	filename = get_static_file(f'/img/upload/tvshow_poster_{moviedb_id}.jpg')
+def _tvshow_filename(moviedb_id: int) -> str:
+	return f'img/upload/tvshow_poster_{moviedb_id}.jpg'
+
+
+def get_tvshow_static(moviedb_id: int) -> Response:
+	return serve_static_file(
+		_tvshow_filename(moviedb_id)
+	) 
+
+
+def get_tvshow_poster(moviedb_id: int):
+	filename = get_static_file(f'/{_tvshow_filename(moviedb_id)}')
 	if not os.path.exists(filename):
 		tvshow = get_tvshow(moviedb_id)
 		_fetch_poster(tvshow['poster_path'], filename)
-
-	return serve_static_file(
-		f'img/upload/tvshow_poster_{moviedb_id}.jpg'
-	)
 
 
 def _episode_filename(moviedb_id: int, season: int, episode: int) -> str:
@@ -145,7 +151,7 @@ def get_episode_static(moviedb_id: int, season: int, episode: int) -> Response:
 	)
 
 
-def get_episode_image(moviedb_id: int, season: int, episode: int) -> Response:
+def get_episode_image(moviedb_id: int, season: int, episode: int):
 	filename = get_static_file(
 		f'/{_episode_filename(moviedb_id, season, episode)}'
 	)

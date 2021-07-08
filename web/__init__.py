@@ -1,13 +1,12 @@
 # Standard library imports
-from datetime import datetime, time
+from datetime import datetime
 
 # Third party imports
 from flask import (
 	send_from_directory, request, session, url_for, redirect,
-	flash, render_template, jsonify, Flask, Response,
+	jsonify, Flask, Response,
 	got_request_exception
 )
-import pytz
 import rollbar
 import rollbar.contrib.flask
 
@@ -15,10 +14,11 @@ import rollbar.contrib.flask
 from web import moviedb, config
 from web.auth import bp as auth_bp
 from web.episode import bp as episode_bp
+from web.show import bp as show_bp
 from flasktools import (
 	handle_exception, params_to_dict, serve_static_file
 )
-from flasktools.auth import is_logged_in, check_login, login_required
+from flasktools.auth import is_logged_in, login_required
 from flasktools.db import disconnect_database, fetch_query, mutate_query
 
 
@@ -28,6 +28,7 @@ app.secret_key = config.SECRETKEY
 
 app.register_blueprint(auth_bp, url_prefix='/auth')
 app.register_blueprint(episode_bp, url_prefix='/episode')
+app.register_blueprint(show_bp, url_prefix='/show')
 
 app.jinja_env.globals.update(is_logged_in=is_logged_in)
 app.jinja_env.globals.update(static_file=serve_static_file)
@@ -68,79 +69,13 @@ def ping() -> Response:
 @app.route('/sitemap.xml')
 def static_from_root() -> Response:
 	return send_from_directory(app.static_folder, request.path[1:])
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login() -> Response:
-	if is_logged_in():
-		return redirect(url_for('home'))
-
-	if request.method == 'POST':
-		params = params_to_dict(request.form)
-
-		ok = check_login(params.get('username'), params.get('password'))
-
-		if ok:
-			return redirect(url_for('home'))
-		else:
-			flash('Login failed.', 'danger')
-			return redirect(url_for('login'))
-
-	return render_template('login.html')
+	
 
 
 @app.route('/logout', methods=['GET'])
 def logout() -> Response:
 	session.pop('userid', None)
 	return redirect(url_for('login'))
-
-
-@app.route('/', methods=['GET'])
-@login_required
-def home() -> Response:
-	episodes = fetch_query(
-		"""
-		SELECT
-			e.id, e.seasonnumber,
-			e.episodenumber, e.name,
-			s.name AS show_name,
-			s.moviedb_id AS show_moviedb_id,
-			e.airdate,
-			s.country
-		FROM episode e
-		LEFT JOIN tvshow s ON (s.id = e.tvshowid)
-		WHERE follows_episode(%s, e.id)
-		ORDER BY e.airdate, show_name, e.seasonnumber, e.episodenumber
-		""",
-		(session['userid'],)
-	)
-	dates = []
-	for e in episodes:
-		if e['country'] is not None:
-			# Convert to user timezone
-			tz = pytz.timezone(pytz.country_timezones[e['country']][0])
-			# Hardcode at 8PM, as moviedb doesn't store airtimes
-			dt = datetime.combine(e['airdate'], time(20))
-			localized = tz.localize(dt)
-			# TODO: pull this from user config
-			e['airdate'] = localized.astimezone(pytz.timezone('Pacific/Auckland'))
-
-		e['in_past'] = e['airdate'].date() < datetime.today().date()
-		# TODO: pull this from user config
-		e['airdate'] = datetime.strftime(e['airdate'], '%A %d/%m/%Y')
-		if e['in_past'] is False and e['airdate'] not in dates:
-			dates.append(e['airdate'])
-		e['poster'] = moviedb.get_tvshow_poster(e['show_moviedb_id'])
-		if not e['poster']:
-			e['poster'] = serve_static_file('img/placeholder.jpg')
-
-	outstanding = any(e['in_past'] is True for e in episodes)
-	return render_template(
-		'schedule.html',
-		outstanding=outstanding,
-		dates=dates,
-		episodes=episodes
-	)
 
 
 @app.route('/shows/watched', methods=['POST'])
@@ -157,35 +92,6 @@ def shows_watched() -> Response:
 	else:
 		error = 'Please select an episode.'
 	return jsonify(error=error)
-
-
-@app.route('/shows', methods=['GET'])
-@login_required
-def shows() -> Response:
-	return render_template('shows.html')
-
-
-@app.route('/shows/list', methods=['GET'])
-@login_required
-def shows_list() -> Response:
-	shows = fetch_query(
-		"""
-		SELECT
-			id, moviedb_id, name
-		FROM tvshow
-		WHERE follows_tvshow(%s, id)
-		ORDER BY name ASC
-		""",
-		(session['userid'],)
-	)
-	for s in shows:
-		s['poster'] = moviedb.get_tvshow_poster(s['moviedb_id'])
-		if not s['poster']:
-			s['poster'] = serve_static_file('img/placeholder.jpg')
-		s['update_url'] = url_for('shows_update', tvshowid=s['id'])
-		del s['moviedb_id']
-
-	return jsonify(shows=shows)
 
 
 @app.route('/shows/search', methods=['GET'])
@@ -210,61 +116,39 @@ def shows_search() -> Response:
 	return jsonify(error=error, result=result)
 
 
-@app.route('/shows/follow', methods=['POST'])
-@login_required
-def shows_follow() -> Response:
-	error = None
-	params = params_to_dict(request.form)
-	moviedb_id = params.get('moviedb_id')
-	if moviedb_id:
-		tvshow = fetch_query(
-			"SELECT id FROM tvshow WHERE moviedb_id = %s",
-			(moviedb_id,),
-			single_row=True
-		)
-		if not tvshow:
-			resp = moviedb.get_tvshow(moviedb_id)
-			tvshow = mutate_query(
-				"""
-				INSERT INTO tvshow (
-					name, country, moviedb_id
-				) VALUES (
-					%s, %s, %s
-				) RETURNING id
-				""",
-				(resp['name'], resp['country'], moviedb_id,),
-				returning=True
-			)
-		mutate_query(
-			"SELECT add_watcher_tvshow(%s, %s)",
-			(session['userid'], tvshow['id'],)
-		)
-		moviedb.get_tvshow_poster(moviedb_id)
-	else:
-		error = 'Please select a show.'
-	return jsonify(error=error)
-
-
-@app.route('/shows/unfollow', methods=['POST'])
-@login_required
-def shows_unfollow() -> Response:
-	error = None
-	params = params_to_dict(request.form)
-	tvshowid = params.get('tvshowid')
-	if tvshowid:
-		mutate_query(
-			"SELECT remove_watcher_tvshow(%s, %s)",
-			(session['userid'], tvshowid,)
-		)
-	else:
-		error = 'Please select a show.'
-	return jsonify(error=error)
-
-
-@app.route('/movies', methods=['GET'])
-@login_required
-def movies() -> Response:
-	return render_template('movies.html')
+# @app.route('/shows/follow', methods=['POST'])
+# @login_required
+# def shows_follow() -> Response:
+# 	error = None
+# 	params = params_to_dict(request.form)
+# 	moviedb_id = params.get('moviedb_id')
+# 	if moviedb_id:
+# 		tvshow = fetch_query(
+# 			"SELECT id FROM tvshow WHERE moviedb_id = %s",
+# 			(moviedb_id,),
+# 			single_row=True
+# 		)
+# 		if not tvshow:
+# 			resp = moviedb.get_tvshow(moviedb_id)
+# 			tvshow = mutate_query(
+# 				"""
+# 				INSERT INTO tvshow (
+# 					name, country, moviedb_id
+# 				) VALUES (
+# 					%s, %s, %s
+# 				) RETURNING id
+# 				""",
+# 				(resp['name'], resp['country'], moviedb_id,),
+# 				returning=True
+# 			)
+# 		mutate_query(
+# 			"SELECT add_watcher_tvshow(%s, %s)",
+# 			(session['userid'], tvshow['id'],)
+# 		)
+# 		moviedb.get_tvshow_poster(moviedb_id)
+# 	else:
+# 		error = 'Please select a show.'
+# 	return jsonify(error=error)
 
 
 @app.route('/movies/list', methods=['GET'])
